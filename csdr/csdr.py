@@ -170,7 +170,7 @@ class dsp(object):
             chain += ["csdr fmdemod_quadri_cf", "dc_block "]
             chain += last_decimation_block
             # dsd modes
-            if which in ["dstar", "nxdn"]:
+            if which in ["dstar"]:
                 chain += ["csdr limit_ff", "csdr convert_f_s16"]
                 if which == "dstar":
                     chain += ["dsd -fd -i - -o - -u {unvoiced_quality} -g -1 "]
@@ -188,6 +188,8 @@ class dsp(object):
                     ]
                 elif which == "ysf":
                     chain += ["ysf_decoder --fifo {meta_pipe}", "mbe_synthesizer -y -f -u {unvoiced_quality}"]
+                elif which == "nxdn":
+                    chain += ["nxdn_decoder --fifo {meta_pipe}", "mbe_synthesizer -f -u {unvoiced_quality}"]
                 max_gain = 0.0005
             chain += [
                 "digitalvoice_filter -f",
