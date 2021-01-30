@@ -74,10 +74,13 @@ class output(object):
 
 class dsp(object):
     def __init__(self, output):
+        self.pycsdr_enabled = True
+        self.pycsdr_chain = None
+        self.buffer = None
+
         self.samp_rate = 250000
         self.output_rate = 11025
         self.hd_output_rate = 44100
-        self.fft_size = 1024
         self.fft_fps = 5
         self.center_freq = 0
         self.offset_freq = 0
@@ -133,6 +136,11 @@ class dsp(object):
         self.direwolf_port = None
         self.process = None
 
+    def setBuffer(self, buffer):
+        self.buffer = buffer
+        if self.pycsdr_chain is not None:
+            self.pycsdr_chain.setInput(buffer)
+
     def set_service(self, flag=True):
         self.is_service = flag
 
@@ -146,17 +154,6 @@ class dsp(object):
             chain += ["csdr setbuf {start_bufsize}"]
         if self.csdr_through:
             chain += ["csdr through"]
-        if which == "fft":
-            chain += [
-                "csdr fft_cc {fft_size} {fft_block_size}",
-                "csdr logpower_cf -70"
-                if self.fft_averages == 0
-                else "csdr logaveragepower_cf -70 {fft_size} {fft_averages}",
-                "csdr fft_exchange_sides_ff {fft_size}",
-            ]
-            if self.fft_compression == "adpcm":
-                chain += ["csdr compress_fft_adpcm_f_u8 {fft_size}"]
-            return chain
         chain += ["csdr shift_addfast_cc --fifo {shift_pipe}"]
         if self.decimation > 1:
             chain += ["csdr fir_decimate_cc {decimation} {ddc_transition_bw} HAMMING"]
@@ -506,13 +503,9 @@ class dsp(object):
         return int(base)
 
     def set_fft_compression(self, what):
+        if self.fft_compression == what:
+            return
         self.fft_compression = what
-
-    def get_fft_bytes_to_read(self):
-        if self.fft_compression == "none":
-            return self.fft_size * 4
-        if self.fft_compression == "adpcm":
-            return int((self.fft_size / 2) + (10 / 2))
 
     def get_secondary_fft_bytes_to_read(self):
         if self.fft_compression == "none":
@@ -521,10 +514,15 @@ class dsp(object):
             return (self.secondary_fft_size / 2) + (10 / 2)
 
     def set_samp_rate(self, samp_rate):
+        if self.samp_rate == samp_rate:
+            return
         self.samp_rate = samp_rate
         self.calculate_decimation()
         if self.running:
-            self.restart()
+            if self.pycsdr_chain is not None:
+                self.pycsdr_chain.setSampleRate(self.samp_rate)
+            else:
+                self.restart()
 
     def calculate_decimation(self):
         (self.decimation, self.last_decimation) = self.get_decimation(self.samp_rate, self.get_audio_rate())
@@ -630,24 +628,6 @@ class dsp(object):
 
     def get_demodulator(self):
         return self.demodulator
-
-    def set_fft_size(self, fft_size):
-        self.fft_size = fft_size
-        self.restart()
-
-    def set_fft_fps(self, fft_fps):
-        self.fft_fps = fft_fps
-        self.restart()
-
-    def set_fft_averages(self, fft_averages):
-        self.fft_averages = fft_averages
-        self.restart()
-
-    def fft_block_size(self):
-        if self.fft_averages == 0:
-            return self.samp_rate / self.fft_fps
-        else:
-            return self.samp_rate / self.fft_fps / self.fft_averages
 
     def set_offset_freq(self, offset_freq):
         if offset_freq is None:
@@ -793,9 +773,6 @@ class dsp(object):
                 dmr_control_pipe=self.pipes["dmr_control_pipe"],
                 decimation=self.decimation,
                 last_decimation=self.last_decimation,
-                fft_size=self.fft_size,
-                fft_block_size=self.fft_block_size(),
-                fft_averages=self.fft_averages,
                 bpf_transition_bw=float(self.bpf_transition_bw) / self.if_samp_rate(),
                 ddc_transition_bw=self.ddc_transition_bw(),
                 flowcontrol=int(self.samp_rate * 2),
@@ -833,7 +810,7 @@ class dsp(object):
                     audio_type,
                     partial(
                         self.process.stdout.read,
-                        self.get_fft_bytes_to_read() if self.demodulator == "fft" else self.get_audio_bytes_to_read(),
+                        self.get_audio_bytes_to_read(),
                     ),
                 )
 
@@ -867,6 +844,9 @@ class dsp(object):
     def stop(self):
         with self.modification_lock:
             self.running = False
+            if self.pycsdr_enabled and self.pycsdr_chain is not None:
+                self.pycsdr_chain.stop()
+                self.pycsdr_chain = None
             if self.process is not None:
                 try:
                     os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
